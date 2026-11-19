@@ -1,0 +1,17 @@
+# Python >= 3.11 (tree.py uses enum.StrEnum)
+
+# Question generator (script/generator-pipeline)
+pydantic>=2
+pandas
+
+# Benchmark, local models (script/benchmark/run_llm_eval.py)
+# torch
+# transformers
+# peft
+# bitsandbytes
+
+# Benchmark, API providers (script/benchmark/run_llm_eval_api_call.py)
+# openai
+# together
+# fireworks-ai
+# python-dotenv

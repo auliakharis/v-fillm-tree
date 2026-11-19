@@ -9,7 +9,7 @@ from enum import StrEnum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from utils import pick_random_contiguous_period_window
+from .utils import pick_random_contiguous_period_window
 
 class SemanticError(Exception):
     """Raised when an expression violates semantic compatibility rules."""
@@ -347,35 +347,6 @@ class Expr(BaseModel, ABC):
         return Expr.make_leaf("amount")
 
     @staticmethod
-    def build_time_series_amount_pair(
-        depth: int,
-        derived_prob: float,
-        derived_registry: dict[str, DerivedConcept] | list[DerivedConcept] | None = None,
-        *,
-        balanced: bool = False,
-    ) -> tuple[Expr, Expr]:
-        if balanced:
-            left_depth, right_depth = depth, depth
-        else:
-            left_depth = right_depth = depth
-        left = Expr.build_amount_tree(
-
-            depth=depth,
-            derived_prob=derived_prob,
-            allow_time_aggregates=False,
-            derived_registry=derived_registry,
-            balanced=balanced,
-        )
-        right = Expr.build_amount_tree(
-            depth=depth,
-            derived_prob=derived_prob,
-            allow_time_aggregates=False,
-            derived_registry=derived_registry,
-            balanced=balanced,
-        )
-        return left, right
-
-    @staticmethod
     def build_ratio_tree(
         depth: int,
         derived_prob: float,
@@ -404,21 +375,16 @@ class Expr(BaseModel, ABC):
             return Expr.make_node(op=Operation.ratio, left=left, right=right)
 
         if op == Operation.growth:
-            left, right = Expr.build_time_series_amount_pair(
-                depth=depth - 1,
+            # Growth compares one metric across two years, so both sides share the same terminal
+            # (a base metric or a named derived concept); binding assigns the two periods.
+            terminal = Expr.sample_amount_terminal(
+                depth=depth,
                 derived_prob=derived_prob,
-                allow_time_aggregates=False,
                 derived_registry=derived_registry,
-                balanced=balanced,
             )
-            right = Expr.build_amount_tree(
-                depth=right_depth,
-                derived_prob=derived_prob,
-                allow_time_aggregates=False,
-                derived_registry=derived_registry,
-                balanced=balanced,
+            return Expr.make_node(
+                op=Operation.growth, left=terminal, right=terminal.model_copy(deep=True)
             )
-            return Expr.make_node(op=Operation.growth, left=left, right=right)
 
         raise ValueError(f"Unsupported ratio op: {op}")
 
@@ -649,6 +615,7 @@ class Expr(BaseModel, ABC):
         require_derived: bool = False,
         *,
         balanced: bool = False,
+        ratio_root_prob: float = 0.0,
     ) -> tuple[Expr, str | None]:
         if max_depth < 0:
             raise ValueError("max_depth must be >= 0.")
@@ -656,6 +623,8 @@ class Expr(BaseModel, ABC):
             raise ValueError("derived_prob must be within [0, 1].")
         if max_attempts <= 0:
             raise ValueError("max_attempts must be > 0.")
+        if not (0.0 <= ratio_root_prob <= 1.0):
+            raise ValueError("ratio_root_prob must be within [0, 1].")
         if require_derived and max_depth == 0:
             raise ValueError(
                 "require_derived=True is unsatisfiable at max_depth=0: no concept "
@@ -664,17 +633,27 @@ class Expr(BaseModel, ABC):
 
         last_reason: str | None = None
         for _ in range(max_attempts):
-            tree = Expr.build_amount_tree(
-                depth=max_depth,
-                derived_prob=derived_prob,
-                derived_registry=derived_registry,
-                balanced=balanced,
-            )
+            # A ratio-valued root (ratio of two amounts, or a growth rate) needs depth >= 1;
+            # at depth 0 build_ratio_tree would only return a bare rate leaf.
+            if max_depth >= 1 and random.uniform(0, 1) < ratio_root_prob:
+                tree = Expr.build_ratio_tree(
+                    depth=max_depth,
+                    derived_prob=derived_prob,
+                    derived_registry=derived_registry,
+                    balanced=balanced,
+                )
+            else:
+                tree = Expr.build_amount_tree(
+                    depth=max_depth,
+                    derived_prob=derived_prob,
+                    derived_registry=derived_registry,
+                    balanced=balanced,
+                )
             violation = Expr.violates_protected_canonical_form(tree, derived_registry)
             if violation is not None:
                 last_reason = f"Rejected because tree duplicated protected concept: {violation}"
                 continue
-            if require_derived and not Expr.contains_derived(tree):
+            if require_derived and not tree.contains_a_derived_concept():
                 last_reason = "Rejected because tree contained no derived concepts."
                 continue
             return tree, last_reason
@@ -1097,8 +1076,10 @@ class Store:
             env=env,
             purpose=purpose,
         )
-        p_left, p_right = random.sample(periods, 2)
-        return entity, concept, p_left, p_right
+        # Evaluator computes (left - right) / right and the question reads "from earlier to later",
+        # so the left operand must be the later year and the right operand the base (earlier) year.
+        p_earlier, p_later = sorted(random.sample(periods, 2))
+        return entity, concept, p_later, p_earlier
     
     def pick_entity_concept_all_periods(
     self,
@@ -1116,7 +1097,7 @@ class Store:
         )
         periods = sorted({a.period for a in concept_period_atoms})
         if len(periods) < 2:
-            raise Exception(
+            raise SemanticError(
                 f"Need at least two periods for concept={concept}, entity={entity} ({purpose})."
             )
         return entity, concept, periods
@@ -1299,9 +1280,9 @@ def compile_and_analyze(
     atoms_json_path: str | Path,
     seed: int = 0,
 ) -> dict:
-    from evaluator import Evaluator
-    from question_renderer import QuestionRenderer
-    from semantic_analyzer import SemanticAnalyzer
+    from .evaluator import Evaluator
+    from .question_renderer import QuestionRenderer
+    from .semantic_analyzer import SemanticAnalyzer
 
     atoms = load_atoms_json(atoms_json_path)
     with open(tree_json_path, "r", encoding="utf-8") as f:

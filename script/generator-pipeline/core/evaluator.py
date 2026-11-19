@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-from tree import Atom, DerivedExpr, Expr, Leaf, Literal, Node, Operation
+from .tree import Atom, DerivedExpr, Expr, Leaf, Literal, Node, Operation
 
 
 class Evaluator:

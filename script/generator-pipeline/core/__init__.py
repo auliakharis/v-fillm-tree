@@ -1,35 +1,38 @@
-"""v2: financial expression tree sampling, binding, semantics, evaluation, and questions."""
+"""Core library for the question generator: expression trees, semantics, evaluation, rendering.
+
+Not meant to be run directly; the entry points are 1-generate-data.py and 2-generate-questions.py
+one folder up.
+"""
 
 from .evaluator import Evaluator
 from .question_renderer import QuestionRenderer
 from .semantic_analyzer import AnalysisResult, Meaning, SemanticAnalyzer
 from .tree import (
-    Atom,
-    AtomIndex,
-    BindEnv,
     DERIVED_CONCEPTS,
+    OPS,
+    Atom,
+    BindEnv,
     DerivedConcept,
     DerivedExpr,
     Expr,
     Leaf,
     Literal,
     Node,
-    OPS,
     Operation,
     SemanticError,
     SemanticType,
     Store,
     TimeAgg,
-    TemplateDerivedConcept,
-    TemplateLeaf,
-    TemplateOperatorNode,
-    TypedTemplate,
+    compile_and_analyze,
+    compile_tree_file,
+    compile_tree_payload,
+    load_atoms_json,
+    print_analysis_tree,
 )
 
 __all__ = [
-    "Atom",
-    "AtomIndex",
     "AnalysisResult",
+    "Atom",
     "BindEnv",
     "DERIVED_CONCEPTS",
     "DerivedConcept",
@@ -48,20 +51,9 @@ __all__ = [
     "SemanticType",
     "Store",
     "TimeAgg",
-    "TemplateDerivedConcept",
-    "TemplateLeaf",
-    "TemplateOperatorNode",
-    "TypedTemplate",
     "compile_and_analyze",
     "compile_tree_file",
     "compile_tree_payload",
-    "expr_depth",
-    "expr_to_json",
-    "flatten_leaves",
-    "flatten_sum",
     "load_atoms_json",
-    "parse_expr",
     "print_analysis_tree",
-    "sample_tree_with_rejection",
-    "show_expr",
 ]

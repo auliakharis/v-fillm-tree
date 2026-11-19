@@ -3,7 +3,7 @@ from __future__ import annotations
 from random import random
 
 
-from semantic_analyzer import (
+from .semantic_analyzer import (
     AnalysisResult,
     base_metric_name,
     base_metric_name_from_child,
@@ -13,7 +13,7 @@ from semantic_analyzer import (
     shared_entity_period_context,
     strip_entity_period_suffix,
 )
-from tree import DerivedExpr, Leaf, Literal, Operation
+from .tree import DerivedExpr, Leaf, Literal, Operation
 
 QUESTION_TEMPLATES = {
     "question": [

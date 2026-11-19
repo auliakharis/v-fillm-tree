@@ -7,13 +7,21 @@ import pandas as pd
 import json
 from pydantic import BaseModel
 import random
+import argparse
+from pathlib import Path
 
-random.seed(42)
+from core.paths import (
+    ATOMS_JSON,
+    CATEGORICAL_COLS_FILE,
+    COMPANIES_FILE,
+    CONCEPT_METADATA_FILE,
+    SCHEMA_JSON,
+    SPREADSHEET_CSV,
+    SPREADSHEET_JSON,
+    YEARLY_NUMERIC_COLS_FILE,
+)
 
 YEARS = list(range(2020, 2026))
-CATEGORICAL_COLS_FILE = "./script/compiler_pipeline_adversarial/config/categorical_cols.json"
-YEARLY_NUMERIC_COLS_FILE = "./script/compiler_pipeline_adversarial/config/yearly_numeric_cols.json"
-COMPANIES_FILE = "./script/compiler_pipeline_adversarial/config/companies.json"
 
 # BaseModel from Pydantic is used for:
 # Data saving to and from json
@@ -132,10 +140,12 @@ def generate_company_row_for_given_year(
     shares_outstanding_range: tuple[float, float],
     stock_price_range: tuple[float, float],
     employees_range: tuple[float, float],
-    multi_factor: float = 1.0,
+    multi_factor: int,
 ) -> tuple[CSVRow, float]:
     growth = random.uniform(-0.08, 0.20)
-    revenue = round(multi_factor * base_revenue * (1 + growth))
+    # Next year's base stays unscaled so multi_factor is applied once, not compounded yearly.
+    next_base_revenue = base_revenue * (1 + growth)
+    revenue = round(multi_factor * next_base_revenue)
 
     # Derive income-statement drivers from revenue.
     cogs = round(revenue * random.uniform(0.30, 0.75))
@@ -199,14 +209,14 @@ def generate_company_row_for_given_year(
         stock_price=price,
         employees=employees,
     )
-    return row, base_revenue * (1 + growth)
+    return row, next_base_revenue
 
 
 def generate_company_row(
     company_tuple: Company,
     categorical_cols: CategorialColumns,
     yearly_numeric_cols: YearlyNumericColumns,
-    multi_factor: float = 1.0,
+    multi_factor: int,
 ) -> list[CSVRow]:
     """Generate one row of the spreadsheet for one company."""
     credit_rating = random.choice(categorical_cols.define["credit_rating"].order)
@@ -217,7 +227,7 @@ def generate_company_row(
     base_revenue = random.uniform(*normalize_range(range))
 
     # Collect one record per year for this company.
-    rows = []
+    rows = [] 
     for year in YEARS:
         csv_row, base_revenue = generate_company_row_for_given_year(
             company_tuple=company_tuple,
@@ -304,7 +314,7 @@ def build_schema(
 
 
 def load_concept_metadata_from_json() -> ConceptMetadataSchema:
-    with open("./script/compiler_pipeline_adversarial/config/concept_metadata.json", "r", encoding="utf-8") as f:
+    with open(CONCEPT_METADATA_FILE, "r", encoding="utf-8") as f:
         concept_metadata = ConceptMetadataSchema.model_validate(json.load(f))
     return concept_metadata
 
@@ -329,8 +339,8 @@ def generate_atoms(
             key=f"{idx}_{concept_name}",
             concept=concept_name,
             semantic_type=concept_info.semantic_type,
-            label=concept_info.statement,
-            entity=row.ticker,
+            label=concept_name.replace("_", " "),
+            entity=row.company_name,
             period=str(row.year),
             unit=concept_info.unit,
             value=getattr(row, concept_name),
@@ -345,7 +355,7 @@ def generate_atoms(
 
 
 def generate_atoms_and_write_to_json(
-    concept_metadata: ConceptMetadataSchema, rows: list[CSVRow], output_path: str
+    concept_metadata: ConceptMetadataSchema, rows: list[CSVRow], output_path: Path
 ) -> None:
     atoms = generate_atoms(concept_metadata, rows)
     json_data = json.dumps([atom.model_dump() for atom in atoms], indent=2)
@@ -353,61 +363,35 @@ def generate_atoms_and_write_to_json(
         f.write(json_data)
 
 
-def resolve_yearly_numeric_cols(
-    obstacle: str | None = None,
-    big_numbers_factor: float | None = None,
-) -> YearlyNumericColumns:
-    """Load column defs, optionally scaling ranges for the big_numbers obstacle."""
-    _, _, yearly_numeric_cols = load_companies_and_columns_from_jsons()
-    if obstacle == "big_numbers":
-        from adversarial import BIG_NUMBERS_SCALE_FACTOR, scale_numeric_ranges
-
-        factor = (
-            big_numbers_factor
-            if big_numbers_factor is not None
-            else BIG_NUMBERS_SCALE_FACTOR
-        )
-        return scale_numeric_ranges(yearly_numeric_cols, factor=factor)
-    if obstacle is not None:
-        from adversarial import validate_obstacle_name
-
-        validate_obstacle_name(obstacle)
-        if obstacle not in ("big_numbers", "prompt_injection"):
-            raise ValueError(
-                f"Obstacle {obstacle!r} is not supported by data_prep. "
-                "Only 'big_numbers' and 'prompt_injection' apply here."
-            )
-    return yearly_numeric_cols
-
-
 def generate_csv(
-    csv_path: str,
-    yearly_numeric_cols: YearlyNumericColumns | None = None,
-    multi_factor: float = 1.0,
+    csv_path: Path, json_path: Path, multi_factor: int
 ) -> tuple[list[str], list[CSVRow]]:
     # Generate all company-year rows.
-    companies, categorical_cols, cols = load_companies_and_columns_from_jsons()
-    if yearly_numeric_cols is None:
-        yearly_numeric_cols = cols
+    companies, categorical_cols, yearly_numeric_cols = (
+        load_companies_and_columns_from_jsons()
+    )
     row = [
-        generate_company_row(company, categorical_cols, yearly_numeric_cols, multi_factor=multi_factor)
+        generate_company_row(company, categorical_cols, yearly_numeric_cols, multi_factor)
         for company in companies.define
     ]
     row: list[CSVRow] = [inner_row for sublist in row for inner_row in sublist]
 
     if not row:
         raise ValueError("No rows were generated from company templates.")
-
+    
     rows_dict = [row.model_dump() for row in row]
     headers = list(rows_dict[0].keys()) if rows_dict else []
     rows_dict = [{k: inner_row[k] for k in headers} for inner_row in rows_dict]
 
     df = pd.DataFrame(rows_dict)
     df.to_csv(csv_path, index=False)
+    # JSON copy of the same rows: this is the spreadsheet context the benchmark feeds to the LLM.
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(rows_dict, f, indent=2)
     return headers, row
 
 
-def generate_json_schema(schema_path: str, columns: list[str], categorical_cols: CategorialColumns, yearly_numeric_cols: YearlyNumericColumns) -> OutputSchema:
+def generate_json_schema(schema_path: Path, columns: list[str], categorical_cols: CategorialColumns, yearly_numeric_cols: YearlyNumericColumns) -> OutputSchema:
     # Write and print schema/preview artifacts for inspection.
     schema: OutputSchema = build_schema(columns, categorical_cols, yearly_numeric_cols)
     schema = schema.model_dump()["columns"]
@@ -416,188 +400,31 @@ def generate_json_schema(schema_path: str, columns: list[str], categorical_cols:
     return schema
 
 
-FINANCIAL_SPREADSHEET_COLUMNS: list[str] = [
-    "company_name",
-    "ticker",
-    "sector",
-    "country",
-    "exchange",
-    "credit_rating",
-    "year",
-    "revenue",
-    "cost_of_goods_sold",
-    "operating_expenses",
-    "non_operating_expenses",
-    "income_tax",
-    "total_assets",
-    "total_liabilities",
-    "total_equity",
-    "cash",
-    "accounts_receivable",
-    "inventories",
-    "short_term_investments",
-    "current_liabilities",
-    "capex",
-    "dividends_paid",
-    "shares_outstanding",
-    "stock_price",
-    "employees",
-]
+def main():
+    parser = argparse.ArgumentParser(description="Generate the synthetic company spreadsheet, schema, and atoms.")
+    parser.add_argument("--factor", type=int, default=1, help="Multiplication factor applied to revenue, shares, price, employees.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for data generation.")
+    parser.add_argument("--csv", type=Path, default=SPREADSHEET_CSV, help="Output spreadsheet CSV.")
+    parser.add_argument("--json", type=Path, default=SPREADSHEET_JSON, help="Output spreadsheet JSON (benchmark context).")
+    parser.add_argument("--schema", type=Path, default=SCHEMA_JSON, help="Output schema JSON.")
+    parser.add_argument("--atoms", type=Path, default=ATOMS_JSON, help="Output atoms JSON.")
+    args = parser.parse_args()
 
+    random.seed(args.seed)
+    for path in (args.csv, args.json, args.schema, args.atoms):
+        path.parent.mkdir(parents=True, exist_ok=True)
 
-def _stringify_financial_spreadsheet_value(value: object) -> str:
-    return str(value)
-
-
-def csv_row_to_financial_spreadsheet_record(row: CSVRow) -> dict[str, str]:
-    """Convert one synthetic row to a financial_spreadsheet.json record (all string values)."""
-    data = row.model_dump()
-    return {
-        col: _stringify_financial_spreadsheet_value(data[col])
-        for col in FINANCIAL_SPREADSHEET_COLUMNS
-    }
-
-
-def csv_rows_to_financial_spreadsheet_records(rows: list[CSVRow]) -> list[dict[str, str]]:
-    return [csv_row_to_financial_spreadsheet_record(row) for row in rows]
-
-
-def write_financial_spreadsheet_json(
-    records: list[dict[str, str]], output_path: str
-) -> None:
-    """Write records in the same schema as financial_spreadsheet.json."""
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(records, f, indent=4)
-
-
-def generate_financial_spreadsheet_rows(
-    yearly_numeric_cols: YearlyNumericColumns | None = None,
-    multi_factor: float = 1.0,
-) -> list[CSVRow]:
-    """Generate synthetic company-year rows (same data as generate_csv, without writing CSV)."""
-    companies, categorical_cols, cols = load_companies_and_columns_from_jsons()
-    if yearly_numeric_cols is None:
-        yearly_numeric_cols = cols
-    nested_rows = [
-        generate_company_row(company, categorical_cols, yearly_numeric_cols, multi_factor=multi_factor)
-        for company in companies.define
-    ]
-    rows: list[CSVRow] = [inner_row for sublist in nested_rows for inner_row in sublist]
-    if not rows:
-        raise ValueError("No rows were generated from company templates.")
-    return rows
-
-
-def generate_financial_spreadsheet_json(
-    output_path: str,
-    yearly_numeric_cols: YearlyNumericColumns | None = None,
-) -> list[dict[str, str]]:
-    """Generate and write financial_spreadsheet.json from synthetic company data."""
-    rows = generate_financial_spreadsheet_rows(yearly_numeric_cols=yearly_numeric_cols)
-    records = csv_rows_to_financial_spreadsheet_records(rows)
-    write_financial_spreadsheet_json(records, output_path)
-    return records
-
-
-def run_data_prep(
-    obstacle: str | None = None,
-    big_numbers_factor: float | None = None,
-    csv_path: str = "script/compiler_pipeline_adversarial/output/financial_spreadsheet.csv",
-    schema_path: str = "script/compiler_pipeline_adversarial/output/schema.json",
-    atoms_path: str = "script/compiler_pipeline_adversarial/output/atoms.json",
-    financial_spreadsheet_path: str = "script/compiler_pipeline_adversarial/output/financial_spreadsheet.json",
-    multi_factor: float = 1.0,
-    injection_rate: float | None = None,
-    apply_prompt_injection: bool = False,
-) -> list[CSVRow]:
-    """Regenerate synthetic CSV, schema, atoms, and financial_spreadsheet.json."""
-    yearly_numeric_cols = resolve_yearly_numeric_cols(
-        obstacle, big_numbers_factor=big_numbers_factor
-    )
-    columns, rows = generate_csv(csv_path, yearly_numeric_cols=yearly_numeric_cols, multi_factor=multi_factor)
+    columns, rows = generate_csv(args.csv, args.json, args.factor)
     concept_metadata_schema = load_concept_metadata_from_json()
-    _, categorical_cols, _ = load_companies_and_columns_from_jsons()
-    generate_json_schema(schema_path, columns, categorical_cols, yearly_numeric_cols)
+    _, categorical_cols, yearly_numeric_cols = load_companies_and_columns_from_jsons()
+    generate_json_schema(args.schema, columns, categorical_cols, yearly_numeric_cols)
     generate_atoms_and_write_to_json(
         concept_metadata=concept_metadata_schema,
         rows=rows,
-        output_path=atoms_path,
+        output_path=args.atoms,
     )
-    records = csv_rows_to_financial_spreadsheet_records(rows)
-    if obstacle == "prompt_injection" or apply_prompt_injection:
-        from adversarial import PROMPT_INJECTION_RATE, inject_prompt_injections
-        rate = injection_rate if injection_rate is not None else PROMPT_INJECTION_RATE
-        records = inject_prompt_injections(records, rate=rate)
-    write_financial_spreadsheet_json(records, financial_spreadsheet_path)
-    return rows
-
-
-def main():
-    import argparse
-
-    from adversarial import (
-        BIG_NUMBERS_SCALE_FACTOR,
-        OBSTACLE_NAMES,
-        validate_big_numbers_factor,
-        validate_obstacle_name,
-    )
-
-    parser = argparse.ArgumentParser(description="Generate synthetic financial spreadsheet data.")
-    parser.add_argument(
-        "--obstacle",
-        choices=OBSTACLE_NAMES,
-        default=None,
-        help="Apply a data-prep obstacle (big_numbers or prompt_injection)",
-    )
-    parser.add_argument(
-        "--big-numbers-factor",
-        type=float,
-        default=BIG_NUMBERS_SCALE_FACTOR,
-        help=(
-            "With --obstacle big_numbers, multiply numeric sampling ranges by this "
-            f"factor (default: {BIG_NUMBERS_SCALE_FACTOR:g})"
-        ),
-    )
-    parser.add_argument(
-        "--multi-factor",
-        type=float,
-        default=1.0,
-        help="Multiply revenue, shares, price, and employees by this factor (default: 1.0)",
-    )
-    parser.add_argument(
-        "--injection-rate",
-        type=float,
-        default=None,
-        help="With --obstacle prompt_injection, fraction of rows to inject (default: PROMPT_INJECTION_RATE)",
-    )
-    args = parser.parse_args()
-    validate_obstacle_name(args.obstacle)
-    validate_big_numbers_factor(args.big_numbers_factor)
-    _DATA_PREP_OBSTACLE_NAMES = ("big_numbers", "prompt_injection")
-    if args.obstacle is not None and args.obstacle not in _DATA_PREP_OBSTACLE_NAMES:
-        parser.error(
-            f"--obstacle {args.obstacle!r} applies to question generation, not data_prep. "
-            "Use make_random_questions.py for that obstacle."
-        )
-    if (
-        args.obstacle != "big_numbers"
-        and args.big_numbers_factor != BIG_NUMBERS_SCALE_FACTOR
-    ):
-        parser.error("--big-numbers-factor requires --obstacle big_numbers")
-    if args.injection_rate is not None and args.obstacle != "prompt_injection":
-        parser.error("--injection-rate requires --obstacle prompt_injection")
-    run_data_prep(
-        obstacle=args.obstacle,
-        big_numbers_factor=args.big_numbers_factor,
-        multi_factor=args.multi_factor,
-        injection_rate=args.injection_rate,
-    )
-    if args.obstacle:
-        print(f"Data prep complete with obstacle: {args.obstacle}")
-        if args.obstacle == "big_numbers":
-            print(f"Big-numbers range factor: {args.big_numbers_factor:g}")
-    else:
-        print("Data prep complete.")
+    print(f"Wrote {len(rows)} company-year rows to {args.csv} and {args.json}")
+    print(f"Wrote schema to {args.schema} and atoms to {args.atoms}")
 
 
 if __name__ == "__main__":

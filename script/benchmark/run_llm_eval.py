@@ -6,8 +6,9 @@ Runs LLM evaluation on two Q&A datasets:
   10q  — 10q/final_qa_dataset.json
          context: one spreadsheet row per company from 10q/financial_spreadsheet.json
 
-  90q  — 90q/random_questions_90.json
-         context: all yearly rows for the entity from 90q/financial_spreadsheet.json
+  90q  — output/random_questions.json (2-generate-questions.py; override with --questions-90q)
+         context: all yearly rows for the entity from output/synthetic_company_data.json
+         (1-generate-data.py; override with --sheet-90q)
 
 For each question, a prompt is built:
   "You are a financial data assistant. Given the following financial sheets statements below
@@ -67,8 +68,10 @@ MODELS_DIR = Path(f"/cluster/scratch/{os.environ.get('USER', 'user')}/models")
 DATASET_10Q = BASE_DIR / "dataset_output" / "random_questions_10q.json"
 SHEET_10Q   = BASE_DIR / "dataset_output" / "atoms_10q.json"
 
-DATASET_90Q = BASE_DIR / "dataset_output" / "random_questions_90.json"
-SHEET_90Q   = BASE_DIR / "dataset_output" / "synthetic_company_data_refactored.json"
+# 90q comes straight from the generator pipeline (script/generator-pipeline) output folder.
+REPO_OUTPUT_DIR = BASE_DIR.parents[1] / "output"
+DATASET_90Q = REPO_OUTPUT_DIR / "random_questions.json"
+SHEET_90Q   = REPO_OUTPUT_DIR / "synthetic_company_data.json"
 
 DATASET_MT  = BASE_DIR / "dataset_output" / "multi_turn_and_augmented_questions.json"
 SHEET_MT    = BASE_DIR / "dataset_output" / "synthetic_company_data_refactored.json"  # same synthetic companies
@@ -798,6 +801,14 @@ def parse_args():
         help="Which dataset(s) to evaluate: 10q, 90q, mt, or any combination (default: all)",
     )
     parser.add_argument(
+        "--questions-90q", type=Path, default=DATASET_90Q,
+        help=f"90q questions JSON from 2-generate-questions.py (default: {DATASET_90Q})",
+    )
+    parser.add_argument(
+        "--sheet-90q", type=Path, default=SHEET_90Q,
+        help=f"90q spreadsheet JSON from 1-generate-data.py (default: {SHEET_90Q})",
+    )
+    parser.add_argument(
         "--finetune", type=str, default=None, metavar="ADAPTER_PATH",
         help="Path to LoRA adapter directory to load on top of the base model (e.g. ./qwen-lora-adapters)",
     )
@@ -825,8 +836,8 @@ def main():
         questions_10q, sheet_lookup_10q = [], {}
 
     if "90q" in args.datasets:
-        questions_90q = load_json(DATASET_90Q)
-        sheet_lookup_90q = build_90q_sheet_lookup(load_json(SHEET_90Q))
+        questions_90q = load_json(args.questions_90q)
+        sheet_lookup_90q = build_90q_sheet_lookup(load_json(args.sheet_90q))
         print(f"  90-Q: {len(questions_90q)} questions, {len(sheet_lookup_90q)} companies")
     else:
         questions_90q, sheet_lookup_90q = [], {}

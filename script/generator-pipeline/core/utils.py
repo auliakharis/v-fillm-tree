@@ -14,7 +14,7 @@ def pick_random_contiguous_period_window(periods: list[str]) -> list[str]:
     min_window = 2
     ordered = sorted(periods)
     if len(ordered) < min_window:
-        raise Exception(
+        raise ValueError(
             f"Need at least {min_window} periods to sample a time-aggregation window."
         )
     window_len = random.randint(min_window, len(ordered))

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import argparse
 import csv
 import json
@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any, Callable, Sequence, TypeVar
 
 from core.evaluator import Evaluator
-from core.paths import CONCEPT_METADATA_FILE, QUESTIONS_CSV, SPREADSHEET_CSV
+from core.metrics import MetricQuestion, MetricQuestionBuilder, load_metrics, safe_eval
+from core.paths import CONCEPT_METADATA_FILE, METRICS_FILE, QUESTIONS_CSV, SPREADSHEET_CSV
 from core.question_renderer import QuestionRenderer
 from core.semantic_analyzer import SemanticAnalyzer
 from core.tree import Atom, BindEnv, DERIVED_CONCEPTS, Expr, SemanticError, Store
@@ -20,6 +21,7 @@ T = TypeVar("T")
 # division by zero, no matching atoms, ...). Anything else is a real bug and must surface.
 REJECTABLE_ERRORS = (SemanticError, ZeroDivisionError, ValueError, RuntimeError)
 MAX_ATTEMPTS_PER_QUESTION = 1000
+METRIC_COLUMNS = ["metric", "pattern", "style", "tier", "pair_id", "reference_answer"]
 
 
 @dataclass
@@ -40,6 +42,7 @@ class RowData:
     leaf_keys: list[str]
     atoms: dict[str, Atom]
     does_expr_contain_derived: bool
+    metric_info: dict[str, Any] = field(default_factory=dict)  # METRIC_COLUMNS values (--mode metrics)
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -106,6 +109,9 @@ def build_atoms_from_dataframe(
 
     for idx, row in enumerate(rows):
         for concept, meta in concept_metadata.items():
+            # Blank cell = not reported (real data). No atom, so questions never bind to it.
+            if not str(row[concept] or "").strip():
+                continue
             atom = Atom(
                 key=f"{idx}_{concept}",
                 concept=concept,
@@ -122,6 +128,14 @@ def build_atoms_from_dataframe(
             atoms[atom.key] = atom
 
     return atoms
+
+
+def check_same_layout(atoms: dict[str, Atom], reference_atoms: dict[str, Atom], path: Path) -> None:
+    """Atom keys are row index + column, so both spreadsheets must list the same company-years in the same order."""
+    for key, atom in atoms.items():
+        ref = reference_atoms.get(key)
+        if ref is None or (ref.entity, ref.period) != (atom.entity, atom.period):
+            raise ValueError(f"{path} does not have the same rows as --csv (first mismatch at {key}).")
 
 
 def flatten_leaf_keys(expr: Expr) -> list[str]:
@@ -159,6 +173,7 @@ def build_row(data: RowData) -> dict[str, Any]:
         "template_internal_nodes": data.template_stats["internal_nodes"],
         "template_leaf_slots": data.template_stats["leaves"],
         "bound_leaf_count": len(data.leaf_keys),
+        **{col: data.metric_info.get(col, "") for col in METRIC_COLUMNS},
     }
 
     for j, leaf_key in enumerate(data.leaf_keys, start=1):
@@ -230,6 +245,32 @@ def generate_one(
     )
 
 
+def generate_one_metric(
+    *,
+    master_rng: random.Random,
+    args: argparse.Namespace,
+    builder: MetricQuestionBuilder,
+    evaluator: Evaluator,
+) -> tuple[MetricQuestion, float, int]:
+    """Sample metric questions until one fits the data and the depth range."""
+    last_reason = "no attempt made"
+    for _ in range(MAX_ATTEMPTS_PER_QUESTION):
+        seed = master_rng.randint(0, 10**9)
+        try:
+            q = with_random_seed(seed, builder.sample)
+            answer = evaluator.eval(q.expr)
+        except (ValueError, ZeroDivisionError) as err:
+            last_reason = f"{type(err).__name__}: {err}"
+            continue
+        if not (args.depth_min <= q.expr.expr_depth() <= args.depth_max):
+            last_reason = f"depth {q.expr.expr_depth()} outside requested range"
+            continue
+        return q, answer, seed
+    raise RuntimeError(
+        f"No valid question after {MAX_ATTEMPTS_PER_QUESTION} attempts. Last reason: {last_reason}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate random financial questions from the synthetic spreadsheet."
@@ -241,9 +282,37 @@ def main() -> None:
         default=CONCEPT_METADATA_FILE,
         help="Concept metadata JSON used to build atoms from the CSV",
     )
-    parser.add_argument("--n", type=int, default=90, help="Number of questions to generate")
-    parser.add_argument("--depth-min", type=int, default=1, help="Minimum tree depth")
-    parser.add_argument("--depth-max", type=int, default=4, help="Maximum tree depth")
+    parser.add_argument(
+        "--mode",
+        choices=["random", "metrics"],
+        default="random",
+        help="random: random operator trees; metrics: financial metrics from --metrics (net margin, ROE, ...)",
+    )
+    parser.add_argument("--metrics", type=Path, default=METRICS_FILE, help="Metric catalogue for --mode metrics")
+    parser.add_argument(
+        "--style",
+        choices=["named", "expanded", "paired"],
+        default="named",
+        help="--mode metrics: named = metric name only (tests if the model knows the formula); "
+        "expanded = definitions given (control); paired = both, two rows per question with the same pair_id",
+    )
+    parser.add_argument(
+        "--turns",
+        choices=["metrics", "leaves"],
+        default="metrics",
+        help="--mode metrics: steps in <output>_multiturn.json. metrics = one turn per intermediate metric value; "
+        "leaves = also one turn per spreadsheet value read",
+    )
+    parser.add_argument(
+        "--reference-csv",
+        type=Path,
+        default=None,
+        help="--mode metrics: a spreadsheet with the same rows as --csv (e.g. the real data behind a counterfactual "
+        "one); adds reference_answer = the answer on that spreadsheet",
+    )
+    parser.add_argument("--n", type=int, default=90, help="Number of questions to generate (pairs with --style paired)")
+    parser.add_argument("--depth-min", type=int, default=None, help="Minimum tree depth (default: 1, or 0 in metrics mode)")
+    parser.add_argument("--depth-max", type=int, default=None, help="Maximum tree depth (default: 4, or no limit in metrics mode)")
     parser.add_argument(
         "--derived-prob-min", type=float, default=0.10, help="Minimum derived concept probability"
     )
@@ -264,6 +333,10 @@ def main() -> None:
         help="Output CSV path; a JSON copy is written next to it with the same stem",
     )
     args = parser.parse_args()
+    if args.depth_min is None:
+        args.depth_min = 0 if args.mode == "metrics" else 1
+    if args.depth_max is None:
+        args.depth_max = 100 if args.mode == "metrics" else 4
     validate_args(args)
 
     output_path: Path = args.output
@@ -275,7 +348,15 @@ def main() -> None:
     store = Store.store_from_atoms(atoms)
     analyzer = SemanticAnalyzer(atoms)
     evaluator = Evaluator(atoms)
+    reference = None
+    if args.reference_csv is not None:
+        reference_atoms = build_atoms_from_dataframe(*read_csv_rows(args.reference_csv), concept_metadata)
+        check_same_layout(atoms, reference_atoms, args.reference_csv)
+        reference = Evaluator(reference_atoms)
     renderer = QuestionRenderer()
+    builder = None
+    if args.mode == "metrics":
+        builder = MetricQuestionBuilder(atoms, load_metrics(args.metrics, set(concept_metadata)))
 
     master_seed = (
         args.seed if args.seed is not None else random.SystemRandom().randint(0, 10**9)
@@ -284,40 +365,64 @@ def main() -> None:
     target_derived_ratio = (args.derived_prob_min + args.derived_prob_max) / 2
 
     rows: list[RowData] = []
+    multiturn: list[dict[str, Any]] = []  # --mode metrics: the same questions, decomposed into turns
     derived_count = 0
     for i in range(1, args.n + 1):
-        need_derived = derived_count / i < target_derived_ratio
-        tree_payload, expr, question, answer, tree_seed, bind_seed, depth, derived_prob = generate_one(
-            master_rng=master_rng,
-            args=args,
-            need_derived=need_derived,
-            store=store,
-            analyzer=analyzer,
-            evaluator=evaluator,
-            renderer=renderer,
-        )
+        if builder is not None:
+            # Metric questions have no separate template: the bound tree stands in for it.
+            q, answer, seed = generate_one_metric(
+                master_rng=master_rng, args=args, builder=builder, evaluator=evaluator
+            )
+            expr = q.expr
+            tree_payload, tree_seed, bind_seed, depth, derived_prob = expr, seed, seed, expr.expr_depth(), 0.0
+            styles = ["named", "expanded"] if args.style == "paired" else [args.style]
+            texts = {"named": q.named, "expanded": q.expanded}
+            variants = [
+                (texts[style], {"metric": q.metric, "pattern": q.pattern, "style": style, "tier": q.tier, "pair_id": i,
+                                "reference_answer": safe_eval(reference, expr) if reference else ""})
+                for style in styles
+            ]
+        else:
+            need_derived = derived_count / i < target_derived_ratio
+            tree_payload, expr, question, answer, tree_seed, bind_seed, depth, derived_prob = generate_one(
+                master_rng=master_rng,
+                args=args,
+                need_derived=need_derived,
+                store=store,
+                analyzer=analyzer,
+                evaluator=evaluator,
+                renderer=renderer,
+            )
+            variants = [(question, {})]
         contains_derived = expr.contains_a_derived_concept()
         derived_count += contains_derived
-        rows.append(
-            RowData(
-                i=i,
-                expr=expr,
-                question=question,
-                answer=answer,
-                expr_json=expr.expr_to_json(),
-                expr_str=expr.show_expr(),
-                tree_payload=tree_payload,
-                tree_seed=tree_seed,
-                bind_seed=bind_seed,
-                master_seed=master_seed,
-                derived_prob=derived_prob,
-                depth=depth,
-                template_stats=Expr.count_nodes(tree_payload),
-                leaf_keys=flatten_leaf_keys(expr),
-                atoms=atoms,
-                does_expr_contain_derived=contains_derived,
+        for question, metric_info in variants:
+            rows.append(
+                RowData(
+                    i=len(rows) + 1,
+                    expr=expr,
+                    question=question,
+                    answer=answer,
+                    expr_json=expr.expr_to_json(),
+                    expr_str=expr.show_expr(),
+                    tree_payload=tree_payload,
+                    tree_seed=tree_seed,
+                    bind_seed=bind_seed,
+                    master_seed=master_seed,
+                    derived_prob=derived_prob,
+                    depth=depth,
+                    template_stats=Expr.count_nodes(tree_payload),
+                    leaf_keys=flatten_leaf_keys(expr),
+                    atoms=atoms,
+                    does_expr_contain_derived=contains_derived,
+                    metric_info=metric_info,
+                )
             )
-        )
+            if builder is not None:
+                record = builder.multiturn_record(
+                    q, metric_info["style"], answer, include_lookups=args.turns == "leaves", reference=reference
+                )
+                multiturn.append({"question_id": len(rows), **record, **metric_info})
 
     rows_to_write = [build_row(row) for row in rows]
     max_leaf_count = max(len(row.leaf_keys) for row in rows)
@@ -340,6 +445,7 @@ def main() -> None:
         "template_internal_nodes",
         "template_leaf_slots",
         "bound_leaf_count",
+        *METRIC_COLUMNS,
     ]
     for j in range(1, max_leaf_count + 1):
         fieldnames.extend(
@@ -357,6 +463,12 @@ def main() -> None:
         json.dump(rows_to_write, f, indent=2, ensure_ascii=False)
 
     print(f"Saved {len(rows_to_write)} questions to {output_path} and {json_path}")
+    if multiturn:
+        multiturn_path = output_path.with_name(output_path.stem + "_multiturn.json")
+        with open(multiturn_path, "w", encoding="utf-8") as f:
+            json.dump(multiturn, f, indent=2, ensure_ascii=False)
+        turns = [r["num_turns"] for r in multiturn]
+        print(f"Saved multi-turn version to {multiturn_path} ({min(turns)}-{max(turns)} turns per question)")
     print(f"Master seed: {master_seed}")
     print(f"Max bound leaf count: {max_leaf_count}")
 

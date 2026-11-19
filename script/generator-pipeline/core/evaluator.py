@@ -35,6 +35,10 @@ class Evaluator:
             if rv == 0:
                 raise ZeroDivisionError("Division by zero in growth base.")
             return (lv - rv) / rv
+        if expr.op == Operation.pow:
+            if lv < 0:
+                raise ValueError("Negative base in power.")
+            return lv ** rv
         if expr.op == Operation.min:
             return min(lv, rv)
         if expr.op == Operation.max:

@@ -756,6 +756,7 @@ class Operation(StrEnum):
     min = "min"
     max = "max"
     avg = "avg"
+    pow = "pow"  # only used by metric questions (CAGR)
 
     def is_time_aggregation(self) -> bool:
         return self in {Operation.min, Operation.max, Operation.avg}

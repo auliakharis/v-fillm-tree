@@ -6,8 +6,8 @@ Runs LLM evaluation on two Q&A datasets:
   10q  — 10q/final_qa_dataset.json
          context: one spreadsheet row per company from 10q/financial_spreadsheet.json
 
-  90q  — output/random_questions.json (2-generate-questions.py; override with --questions-90q)
-         context: all yearly rows for the entity from output/synthetic_company_data.json
+  90q  — output/synthetic/synthetic_questions.json (2-generate-questions.py; override with --questions-90q)
+         context: all yearly rows for the entity from output/synthetic/synthetic_company_data.json
          (1-generate-data.py; override with --sheet-90q)
 
 For each question, a prompt is built:
@@ -84,8 +84,8 @@ SHEET_10Q   = BASE_DIR / "10q" / "financial_spreadsheet.json"
 
 # 90q comes straight from the generator pipeline (script/generator-pipeline) output folder.
 REPO_OUTPUT_DIR = Path(__file__).resolve().parents[2] / "output"
-DATASET_90Q = REPO_OUTPUT_DIR / "random_questions.json"
-SHEET_90Q   = REPO_OUTPUT_DIR / "synthetic_company_data.json"
+DATASET_90Q = REPO_OUTPUT_DIR / "synthetic" / "synthetic_questions.json"
+SHEET_90Q   = REPO_OUTPUT_DIR / "synthetic" / "synthetic_company_data.json"
 DATASET_MT  = BASE_DIR.parent.parent /  "output_augmented.json"
 SHEET_MT    = BASE_DIR / "output" / "financial_spreadsheet.json"  # same synthetic companies
 DEFAULT_MODELS = ["swiss-ai/Apertus-70B-Instruct-2509",
@@ -459,6 +459,17 @@ async def ask_one_90q_question(i: int, max_new_tokens: int, model_name: str, q, 
     }
 
 
+def gold_turn_message(q: dict, turn_index: int) -> str | None:
+    """--gold-history: assistant message carrying the correct answer of one turn, or None if it is unknown."""
+    turns = q.get("turns", [])
+    if turn_index >= len(turns) or turns[turn_index].get("ground_truth") is None:
+        return None
+    truth = turns[turn_index]["ground_truth"]
+    if isinstance(truth, (int, float)) and not isinstance(truth, bool):
+        truth = f"{truth:.10g}"
+    return f"Answer: {truth}"
+
+
 async def evaluate_multiturn(
     questions: list,
     sheet_lookup: dict,
@@ -466,6 +477,7 @@ async def evaluate_multiturn(
     limit: int | None,
     tol: float,
     max_new_tokens: int = 512,
+    gold_history: bool = False,
 ) -> list:
     """
     Evaluate multi-turn questions.
@@ -513,6 +525,7 @@ async def evaluate_multiturn(
             print(f"  [{i}/{len(subset)}] SKIP (company not found in spreadsheet) | {original_q[:60]}...")
             results.append({
                 "source": "mt",
+                "history": "gold" if gold_history else "model",
                 "id": qid,
                 "entity": None,
                 "depth": depth,
@@ -540,7 +553,8 @@ async def evaluate_multiturn(
                 # Snapshot the full context sent to the model (copy before adding response)
                 turn_prompt_snapshots.append(list(history))
                 response = await run_multiturn_inference(model_name, history, max_new_tokens)
-                history.append({"role": "assistant", "content": strip_thinking_tags(response)})
+                gold = gold_turn_message(q, len(turn_responses)) if gold_history else None
+                history.append({"role": "assistant", "content": gold or strip_thinking_tags(response)})
                 turn_responses.append(response)
                 turn_questions.append(question_text)
                 final_response = response
@@ -585,6 +599,7 @@ async def evaluate_multiturn(
 
         results.append({
             "source": "mt",
+            "history": "gold" if gold_history else "model",
             "id": qid,
             "entity": company,
             "depth": depth,
@@ -774,6 +789,20 @@ def parse_args():
         "--sheet-90q", type=Path, default=SHEET_90Q,
         help=f"90q spreadsheet JSON from 1-generate-data.py (default: {SHEET_90Q})",
     )
+    parser.add_argument(
+        "--questions-mt", type=Path, default=DATASET_MT,
+        help="Multi-turn questions JSON, e.g. output/real/real_questions_multiturn.json from "
+        f"2-generate-questions.py --mode metrics (default: {DATASET_MT})",
+    )
+    parser.add_argument(
+        "--sheet-mt", type=Path, default=SHEET_MT,
+        help=f"Spreadsheet JSON for the multi-turn questions (default: {SHEET_MT})",
+    )
+    parser.add_argument(
+        "--gold-history", action="store_true", default=False,
+        help="Multi-turn: after each turn put the CORRECT answer in the history instead of the model's own, "
+        "so every turn is scored independently (no error carried over from earlier turns)",
+    )
     return parser.parse_args()
 
 
@@ -838,8 +867,8 @@ def main():
     questions_mt, sheet_lookup_mt = [], {}
 
     if "mt" in args.datasets:
-        questions_mt = load_json(DATASET_MT)
-        sheet_lookup_mt = build_90q_sheet_lookup(load_json(SHEET_MT))
+        questions_mt = load_json(args.questions_mt)
+        sheet_lookup_mt = build_90q_sheet_lookup(load_json(args.sheet_mt))
         non_skipped = sum(1 for q in questions_mt if not q.get("skipped"))
         print(f"  Multi-turn: {len(questions_mt)} total, {non_skipped} non-skipped, {len(sheet_lookup_mt)} companies")
 
@@ -901,6 +930,7 @@ def main():
             results_mt = asyncio.run(evaluate_multiturn(
                 questions_mt, sheet_lookup_mt, model_name,
                 limit=args.limit, tol=args.tol, max_new_tokens=args.max_new_tokens,
+                gold_history=args.gold_history,
             ))
         else:
             results_mt = []

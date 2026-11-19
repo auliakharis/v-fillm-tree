@@ -1,0 +1,14 @@
+{
+    "define": [
+        {"cik": 320193,  "name": "Apple Inc",              "ticker": "AAPL", "sector": "Technology",  "country": "USA", "exchange": "NASDAQ"},
+        {"cik": 789019,  "name": "Microsoft Corp",         "ticker": "MSFT", "sector": "Technology",  "country": "USA", "exchange": "NASDAQ"},
+        {"cik": 200406,  "name": "Johnson & Johnson",      "ticker": "JNJ",  "sector": "Healthcare",  "country": "USA", "exchange": "NYSE"},
+        {"cik": 78003,   "name": "Pfizer Inc",             "ticker": "PFE",  "sector": "Healthcare",  "country": "USA", "exchange": "NYSE"},
+        {"cik": 18230,   "name": "Caterpillar Inc",        "ticker": "CAT",  "sector": "Industrials", "country": "USA", "exchange": "NYSE"},
+        {"cik": 315189,  "name": "Deere & Co",             "ticker": "DE",   "sector": "Industrials", "country": "USA", "exchange": "NYSE"},
+        {"cik": 104169,  "name": "Walmart Inc",            "ticker": "WMT",  "sector": "Consumer",    "country": "USA", "exchange": "NYSE"},
+        {"cik": 27419,   "name": "Target Corp",            "ticker": "TGT",  "sector": "Consumer",    "country": "USA", "exchange": "NYSE"},
+        {"cik": 21344,   "name": "Coca-Cola Co",           "ticker": "KO",   "sector": "Consumer",    "country": "USA", "exchange": "NYSE"},
+        {"cik": 34088,   "name": "Exxon Mobil Corp",       "ticker": "XOM",  "sector": "Energy",      "country": "USA", "exchange": "NYSE"}
+    ]
+}

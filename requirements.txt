@@ -6,7 +6,7 @@ pandas
 
 # Benchmark, local models (script/benchmark/run_llm_eval.py)
 torch
-# transformers
+transformers
 # peft
 # bitsandbytes
 

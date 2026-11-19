@@ -5,7 +5,7 @@ pydantic>=2
 pandas
 
 # Benchmark, local models (script/benchmark/run_llm_eval.py)
-# torch
+torch
 # transformers
 # peft
 # bitsandbytes
